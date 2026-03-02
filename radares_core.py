@@ -3,13 +3,14 @@ radares_core.py
 ===================
 Núcleo GIS paramétrico para la inyección de radares en trazas GPX.
 
-Diseñado con eficiencia O(1) en red espacial mediante descarga de 
-Bounding Box y caché agresiva con Streamlit.
-Cruce geométrico en EPSG:25830 (UTM 30N) usando buffer de 30m e indexación R-Tree.
+Diseñado con eficiencia O(1) total (Data Lake Local) usando 
+Predicate Pushdown sobre GeoParquet.
+Cruce geométrico estricto en EPSG:25830 (UTM 30N) y buffer 30m.
 """
 
 from __future__ import annotations
 import copy
+import math
 import warnings
 from pathlib import Path
 
@@ -24,10 +25,8 @@ from shapely.geometry import LineString, Point
 # Silencia advertencias de GeoPandas
 warnings.filterwarnings("ignore", category=UserWarning, module="geopandas")
 
-# CRS de origen (GPS / WGS84) y CRS de trabajo (UTM zona 30N, metro como unidad)
+# CRS de origen (GPS / WGS84)
 CRS_WGS84 = "EPSG:4326"
-CRS_UTM30N = "EPSG:25830"
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 
 def load_gpx_track(gpx_path) -> tuple[gpxpy.gpx.GPX, LineString]:
@@ -72,88 +71,95 @@ def load_gpx_track(gpx_path) -> tuple[gpxpy.gpx.GPX, LineString]:
 def simplify_track(track: LineString, tolerance_deg: float = 0.0001) -> LineString:
     """
     Simplifica un LineString usando el algoritmo de Ramer-Douglas-Peucker.
+    Reservado EXCLUSIVAMENTE para visualización. Su uso en cruce de radares
+    causa 'Destrucción Topológica' (corta curvas de herradura).
     """
     return track.simplify(tolerance_deg, preserve_topology=True)
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_speed_cameras(min_lon: float, min_lat: float, max_lon: float, max_lat: float) -> dict:
+@st.cache_data(show_spinner=False)
+def _read_parquet_bbox(min_lon: float, min_lat: float, max_lon: float, max_lat: float) -> gpd.GeoDataFrame:
     """
-    Realiza una consulta [out:json] a la API de Overpass buscando nodos con 
-    la etiqueta highway=speed_camera dentro del BBox.
+    Lee del archivo .parquet usando Predicate Pushdown (bbox).
+    La memoria RAM empleada es marginal y la latencia O(1).
     """
-    query = f"""
-    [out:json][timeout:25];
-    node["highway"="speed_camera"]({min_lat},{min_lon},{max_lat},{max_lon});
-    out body;
-    """
-    resp = requests.post(OVERPASS_URL, data={"data": query}, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    parquet_path = Path("data/radares_espana.parquet")
+    if not parquet_path.exists():
+        raise FileNotFoundError(
+            f"No se encuentra el Data Lake en {parquet_path}. "
+            "Ejecuta 'python scripts/descargar_radares_nacionales.py' primero."
+        )
+    return gpd.read_parquet(parquet_path, bbox=(min_lon, min_lat, max_lon, max_lat))
 
 
-def get_radares_gdf(track: LineString) -> gpd.GeoDataFrame:
+def load_local_radares(track: LineString) -> gpd.GeoDataFrame:
     """
-    Descarga los radares del bounding box de la ruta y los convierte a un GeoDataFrame.
-    Proyecta las coordenadas a EPSG:25830 (UTM 30N).
+    Lee directamente del disco SOLO los radares que caen en el BBox extendido de la ruta.
+    Aplica redondeo expansivo matemático al BBox para una caché determinista OOM-proof.
+    Proyecta los resultados a CRS Local UTM de forma transparente.
     """
-    # 1. Bounding box con margen paramétrico para evitar omisiones en los extremos
-    min_lon, min_lat, max_lon, max_lat = track.bounds
-    margin = 0.02  # Aproximadamente 2 km
-    min_lon -= margin
-    min_lat -= margin
-    max_lon += margin
-    max_lat += margin
-
-    # 2. Extracción (cacheada @ 24h)
-    data = fetch_speed_cameras(min_lon, min_lat, max_lon, max_lat)
+    # 1. Bounding box estricto del track original
+    min_x, min_y, max_x, max_y = track.bounds
     
-    elements = data.get("elements", [])
-    if not elements:
-        return gpd.GeoDataFrame(columns=["id", "maxspeed", "geometry"], crs=CRS_UTM30N)
-
-    # 3. Construir lista de puntos
-    records = []
-    geometry = []
-    for el in elements:
-        lon, lat = el.get("lon"), el.get("lat")
-        if lon is None or lat is None:
-            continue
-        tags = el.get("tags", {})
-        records.append({
-            "id": el.get("id"),
-            "maxspeed": tags.get("maxspeed", None)
-        })
-        geometry.append(Point(lon, lat))
-
-    if not geometry:
-        return gpd.GeoDataFrame(columns=["id", "maxspeed", "geometry"], crs=CRS_UTM30N)
-
-    # 4. Crear GDF WGS84 y proyectar a UTM30N
-    gdf = gpd.GeoDataFrame(records, geometry=geometry, crs=CRS_WGS84)
-    gdf_utm = gdf.to_crs(CRS_UTM30N)
+    # Añadimos un pequeño margen de seguridad (~5 km)
+    margin = 0.05
+    min_x -= margin
+    min_y -= margin
+    max_x += margin
+    max_y += margin
     
-    return gdf_utm
+    # 2. Redondeo expansivo matemático al primer decimal (~11km de celda)
+    cache_min_lon = math.floor(min_x * 10) / 10
+    cache_min_lat = math.floor(min_y * 10) / 10
+    cache_max_lon = math.ceil(max_x * 10) / 10
+    cache_max_lat = math.ceil(max_y * 10) / 10
+    
+    # 3. Predicate Pushdown para lectura O(1) ultra rápida
+    gdf_radares_wgs = _read_parquet_bbox(cache_min_lon, cache_min_lat, cache_max_lon, cache_max_lat)
+    
+    if gdf_radares_wgs.empty:
+        # Devolver GDF vacío proyectado
+        gdf_track_wgs = gpd.GeoDataFrame(geometry=[track], crs=CRS_WGS84)
+        local_crs = gdf_track_wgs.estimate_utm_crs()
+        return gpd.GeoDataFrame(columns=["id", "maxspeed", "geometry"], crs=local_crs)
+        
+    # 4. Estimar CRS Local y proyectar el DataFrame a distancias métricas
+    gdf_track_wgs = gpd.GeoDataFrame(geometry=[track], crs=CRS_WGS84)
+    local_crs = gdf_track_wgs.estimate_utm_crs()
+    
+    if gdf_radares_wgs.crs is None:
+        gdf_radares_wgs.set_crs(CRS_WGS84, inplace=True)
+        
+    gdf_radares_utm = gdf_radares_wgs.to_crs(local_crs)
+    return gdf_radares_utm
 
 
 def intersect_radares_route(track: LineString, gdf_radares: gpd.GeoDataFrame, buffer_meters: float = 30.0) -> gpd.GeoDataFrame:
     """
     Cruce Espacial de Alta Precisión:
-    Crea un buffer de 30 metros alrededor de la ruta en UTM 30N.
+    Crea un buffer de 30 metros alrededor de la ruta usando un esquema CRS Local estimado.
     Utiliza gpd.sjoin con el motor de indexación R-Tree e 'intersects'.
+    
+    IMPORTANTE: El `track` suministrado aquí NUNCA debe ser una geometría simplificada,
+    o de lo contrario el atajo matará radares en curvas cerradas.
     """
     if gdf_radares.empty:
         return gdf_radares
 
-    # 1. Proyectar el track en WGS84 a UTM 30N
+    # 1. Estimar CRS Local y proyectar el track original sin simplificar
     gdf_track = gpd.GeoDataFrame(geometry=[track], crs=CRS_WGS84)
-    gdf_track_utm = gdf_track.to_crs(CRS_UTM30N)
+    local_crs = gdf_track.estimate_utm_crs()
+    gdf_track_utm = gdf_track.to_crs(local_crs)
+    
+    # Nos aseguramos que los radares vengan en el mismo CRS local (load_local_radares ya lo hace)
+    if gdf_radares.crs != local_crs:
+        gdf_radares = gdf_radares.to_crs(local_crs)
 
-    # 2. Buffer de 30 metros
+    # 2. Buffer de 30 metros paramétrico
     gdf_buffer = gdf_track_utm.copy()
     gdf_buffer["geometry"] = gdf_track_utm.buffer(buffer_meters, resolution=3)
 
-    # 3. Spatial Join
+    # 3. Spatial Join R-Tree
     gdf_joined = gpd.sjoin(
         gdf_radares, 
         gdf_buffer[["geometry"]], 
@@ -169,11 +175,6 @@ def intersect_radares_route(track: LineString, gdf_radares: gpd.GeoDataFrame, bu
 def inject_waypoints(gpx: gpxpy.gpx.GPX, gdf_radares: gpd.GeoDataFrame) -> gpxpy.gpx.GPX:
     """
     Añade nodos <wpt> al objeto GPX para cada radar en ruta.
-    
-    Esquema de Etiquetas:
-    - <name>: "RADAR [Valor]" o "RADAR FIJO"
-    - <sym>: "Danger"
-    - <desc>: Mensaje estándar de aviso preventivo.
     """
     gpx_out = copy.deepcopy(gpx)
     
