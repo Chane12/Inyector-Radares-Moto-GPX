@@ -20,7 +20,7 @@ import geopandas as gpd
 import pandas as pd
 import requests
 import streamlit as st
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, MultiLineString
 
 # Silencia advertencias de GeoPandas
 warnings.filterwarnings("ignore", category=UserWarning, module="geopandas")
@@ -29,11 +29,11 @@ warnings.filterwarnings("ignore", category=UserWarning, module="geopandas")
 CRS_WGS84 = "EPSG:4326"
 
 
-def load_gpx_track(gpx_path) -> tuple[gpxpy.gpx.GPX, LineString]:
+def load_gpx_track(gpx_path) -> tuple[gpxpy.gpx.GPX, MultiLineString]:
     """
     Lee un archivo GPX (ruta o bytes) y extrae el track principal como un 
-    LineString de Shapely iterando sobre los segmentos, y devuelve el objeto GPX
-    completo e inofensivo.
+    MultiLineString de Shapely iterando sobre los segmentos, y devuelve el objeto GPX
+    completo e inofensivo. Previene el 'teletransporte topológico'.
     """
     if isinstance(gpx_path, bytes):
         try:
@@ -50,34 +50,36 @@ def load_gpx_track(gpx_path) -> tuple[gpxpy.gpx.GPX, LineString]:
             with open(gpx_path, "r", encoding="latin-1") as f:
                 gpx = gpxpy.parse(f)
 
-    coords: list[tuple[float, float]] = []
+    lines = []
 
     for track in gpx.tracks:
         for segment in track.segments:
-            for point in segment.points:
-                coords.append((point.longitude, point.latitude))
+            coords = [(point.longitude, point.latitude) for point in segment.points]
+            if len(coords) >= 2:
+                lines.append(LineString(coords))
 
-    if not coords:
+    if not lines:
         for route in gpx.routes:
-            for point in route.points:
-                coords.append((point.longitude, point.latitude))
+            coords = [(point.longitude, point.latitude) for point in route.points]
+            if len(coords) >= 2:
+                lines.append(LineString(coords))
 
-    if len(coords) < 2:
-        raise ValueError("El GPX debe contener al menos 2 puntos.")
+    if not lines:
+        raise ValueError("El GPX debe contener al menos un segmento con 2 puntos.")
 
-    return gpx, LineString(coords)
+    return gpx, MultiLineString(lines)
 
 
-def simplify_track(track: LineString, tolerance_deg: float = 0.0001) -> LineString:
+def simplify_track(track: MultiLineString, tolerance_deg: float = 0.0001) -> MultiLineString:
     """
-    Simplifica un LineString usando el algoritmo de Ramer-Douglas-Peucker.
+    Simplifica un MultiLineString usando el algoritmo de Ramer-Douglas-Peucker.
     Reservado EXCLUSIVAMENTE para visualización. Su uso en cruce de radares
     causa 'Destrucción Topológica' (corta curvas de herradura).
     """
     return track.simplify(tolerance_deg, preserve_topology=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=5, ttl=3600)
 def _read_parquet_bbox(min_lon: float, min_lat: float, max_lon: float, max_lat: float) -> gpd.GeoDataFrame:
     """
     Lee del archivo .parquet usando Predicate Pushdown (bbox).
@@ -92,10 +94,10 @@ def _read_parquet_bbox(min_lon: float, min_lat: float, max_lon: float, max_lat: 
     return gpd.read_parquet(parquet_path, bbox=(min_lon, min_lat, max_lon, max_lat))
 
 
-def load_local_radares(track: LineString) -> gpd.GeoDataFrame:
+def load_local_radares(track: MultiLineString) -> gpd.GeoDataFrame:
     """
     Lee directamente del disco SOLO los radares que caen en el BBox extendido de la ruta.
-    Aplica redondeo expansivo matemático al BBox para una caché determinista OOM-proof.
+    Aplica redondeo expansivo matemático al grid absoluto para una caché determinista OOM-proof.
     Proyecta los resultados a CRS Local UTM de forma transparente.
     """
     # 1. Bounding box estricto del track original
@@ -108,11 +110,11 @@ def load_local_radares(track: LineString) -> gpd.GeoDataFrame:
     max_x += margin
     max_y += margin
     
-    # 2. Redondeo expansivo matemático al primer decimal (~11km de celda)
-    cache_min_lon = math.floor(min_x * 10) / 10
-    cache_min_lat = math.floor(min_y * 10) / 10
-    cache_max_lon = math.ceil(max_x * 10) / 10
-    cache_max_lat = math.ceil(max_y * 10) / 10
+    # 2. Redondeo a cuadrícula absoluta (Grid Snapping) de 0.5 grados
+    cache_min_lon = math.floor(min_x / 0.5) * 0.5
+    cache_min_lat = math.floor(min_y / 0.5) * 0.5
+    cache_max_lon = math.ceil(max_x / 0.5) * 0.5
+    cache_max_lat = math.ceil(max_y / 0.5) * 0.5
     
     # 3. Predicate Pushdown para lectura O(1) ultra rápida
     gdf_radares_wgs = _read_parquet_bbox(cache_min_lon, cache_min_lat, cache_max_lon, cache_max_lat)
@@ -134,11 +136,11 @@ def load_local_radares(track: LineString) -> gpd.GeoDataFrame:
     return gdf_radares_utm
 
 
-def intersect_radares_route(track: LineString, gdf_radares: gpd.GeoDataFrame, buffer_meters: float = 30.0) -> gpd.GeoDataFrame:
+def intersect_radares_route(track: MultiLineString, gdf_radares: gpd.GeoDataFrame, buffer_meters: float = 30.0) -> gpd.GeoDataFrame:
     """
     Cruce Espacial de Alta Precisión:
-    Crea un buffer de 30 metros alrededor de la ruta usando un esquema CRS Local estimado.
-    Utiliza gpd.sjoin con el motor de indexación R-Tree e 'intersects'.
+    Utiliza sjoin_nearest para evitar OOM con buffers poligonales complejos de la ruta.
+    Busca radares a menos de buffer_meters mediante matemática vectorial.
     
     IMPORTANTE: El `track` suministrado aquí NUNCA debe ser una geometría simplificada,
     o de lo contrario el atajo matará radares en curvas cerradas.
@@ -155,20 +157,57 @@ def intersect_radares_route(track: LineString, gdf_radares: gpd.GeoDataFrame, bu
     if gdf_radares.crs != local_crs:
         gdf_radares = gdf_radares.to_crs(local_crs)
 
-    # 2. Buffer de 30 metros paramétrico
-    gdf_buffer = gdf_track_utm.copy()
-    gdf_buffer["geometry"] = gdf_track_utm.buffer(buffer_meters, resolution=3)
-
-    # 3. Spatial Join R-Tree
-    gdf_joined = gpd.sjoin(
+    # 2. Spatial Join Nearest (distancia máxima de intersección O(1))
+    gdf_joined = gpd.sjoin_nearest(
         gdf_radares, 
-        gdf_buffer[["geometry"]], 
+        gdf_track_utm, 
         how="inner", 
-        predicate="intersects"
+        max_distance=buffer_meters,
+        distance_col="dist_ruta"
     )
     
-    # Previene radares duplicados si múltiples secciones de ruta hacen intersección
+    # 3. Previene radares duplicados teóricos por seguridad
     gdf_joined = gdf_joined.drop_duplicates(subset=["id"])
+    
+    # 4. Deduplicación Espacial Vectorial y Retención Algorítmica Preventiva (Sin iterrows)
+    # Protege al motorista de "Tartamudeos TTS" en radares de doble carril, garantizando 
+    # la retención estricta de la velocidad inferior/restrictiva mediante Álgebra de Conjuntos (C-GEOS).
+    if len(gdf_joined) > 1:
+        # 4.a. Creación Vectorial de la Topología de Colapso (Radio 25m = Tolerancia 50m)
+        buffers = gdf_joined.geometry.buffer(25)
+        union_geom = buffers.unary_union
+        
+        if union_geom.geom_type == 'Polygon':
+            clusters = [union_geom]
+        elif union_geom.geom_type == 'MultiPolygon':
+            clusters = list(union_geom.geoms)
+        else:
+            clusters = []
+            
+        gdf_clusters = gpd.GeoDataFrame({"cluster_id": range(len(clusters))}, geometry=clusters, crs=local_crs)
+        
+        # 4.b. Spatial Join Nativo: Inscribe cada radar orgánico en su clúster de contención
+        gdf_clustered = gpd.sjoin(gdf_joined, gdf_clusters, how="inner", predicate="intersects")
+        
+        # 4.c. Álgebra Relacional: Extraer velocidad restrictiva global dentro del clúster (O(N) nativo)
+        gdf_clustered["speed_num"] = pd.to_numeric(gdf_clustered["maxspeed"], errors="coerce")
+        min_speeds = gdf_clustered.groupby("cluster_id")["speed_num"].min()
+        
+        # 4.d. Consolidación Geoespacial y Proyección de Atributos
+        # Retenemos un único radar representativo por cada macro-clúster (eliminando las ramas urbanas inútiles)
+        gdf_joined = gdf_clustered.drop_duplicates(subset=["cluster_id"]).copy()
+        
+        # Auto-mapeamos la velocidad restrictiva absoluta calculada al 'waypoint' representativo
+        gdf_joined["speed_num"] = gdf_joined["cluster_id"].map(min_speeds)
+        
+        # Inyectar el número en string al 'maxspeed' conservando los nulos (None/NaN) de forma segura
+        mask = gdf_joined["speed_num"].notna()
+        gdf_joined.loc[mask, "maxspeed"] = gdf_joined.loc[mask, "speed_num"].astype(int).astype(str)
+        
+        # Limpieza simétrica de metadata temporal de la tabla
+        cols_to_keep = [col for col in gdf_joined.columns if col not in ['index_right', 'cluster_id', 'speed_num']]
+        gdf_joined = gdf_joined[cols_to_keep]
+
     return gdf_joined
 
 

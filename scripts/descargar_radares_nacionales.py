@@ -64,8 +64,15 @@ if __name__ == "__main__":
     # min_lon, min_lat, max_lon, max_lat
     PENINSULA_BBOX = (-9.5, 36.0, 4.0, 44.0)
     
+    import sys
+    
     gdf_radares = descargar_radares_bbox(*PENINSULA_BBOX)
     
+    if gdf_radares is None:
+        print("❌ ERROR CRÍTICO: La extracción ha devuelto None (fallo de red o sin datos).", file=sys.stderr)
+        print("Abortando GitHub Action con código 1 para prevenir Degradación Silenciosa y auto-commit destructivo.", file=sys.stderr)
+        sys.exit(1)
+        
     if gdf_radares is not None:
         # =================================================================
         # SANITY CHECKS (AUDITORÍA DE CALIDAD ANTI-ENVENENAMIENTO)
