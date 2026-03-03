@@ -1,5 +1,7 @@
 # 🏍️ Inyector de Radares GPX para Moto (Cloud Native Edition)
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://chane12-inyector-radares-moto-gpx-radares-app-hkqbrb.streamlit.app/)
+
 Una arquitectura *Cloud Native* diseñada para resolver un problema crítico del mundo real de forma tolerante a fallos, ultrarrápida y libre de dependencias pesadas. Este sistema ingiere rutas GPX de motociclistas de aventura y enriquece espacialmente el archivo inyectando radares de velocidad como *waypoints*, garantizando su compatibilidad en la navegación offline (OsmAnd, Garmin, DMD2).
 
 Más que una simple utilidad, este proyecto es un ejercicio de **Ingeniería de Sistemas, Optimización Algorítmica y Rugged UX**, pensado para ofrecer rendimiento de grado corporativo procesando datos espaciales masivos en contenedores efímeros de bajos recursos.
