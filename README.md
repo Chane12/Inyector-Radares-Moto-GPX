@@ -1,6 +1,6 @@
 # 🏍️ Inyector de Radares GPX para Moto (Cloud Native Edition)
 
-**Prueba la herramienta en vivo aquí:** [https://chane12-inyector-radares-moto-gpx-radares-app-hkqbrb.streamlit.app/](https://chane12-inyector-radares-moto-gpx-radares-app-hkqbrb.streamlit.app/)
+**Prueba la herramienta aquí:** [https://chane12-inyector-radares-moto-gpx-radares-app-hkqbrb.streamlit.app/](https://chane12-inyector-radares-moto-gpx-radares-app-hkqbrb.streamlit.app/)
 
 Una arquitectura *Cloud Native* diseñada para resolver un problema crítico del mundo real de forma tolerante a fallos, ultrarrápida y libre de dependencias pesadas. Este sistema ingiere rutas GPX de motociclistas de aventura y enriquece espacialmente el archivo inyectando radares de velocidad como *waypoints*, garantizando su compatibilidad en la navegación offline (OsmAnd, Garmin, DMD2).
 
