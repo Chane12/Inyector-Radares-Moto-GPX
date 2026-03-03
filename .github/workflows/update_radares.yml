@@ -1,0 +1,43 @@
+name: Actualización Mensual de Radares
+
+on:
+  schedule:
+    # Ejecuta a las 00:00 UTC el día 1 de cada mes
+    - cron: '0 0 1 * *'
+  workflow_dispatch: # Permite lanzar la actualización manualmente desde la pestaña Actions
+
+jobs:
+  update-datalake:
+    runs-on: ubuntu-latest
+    
+    # Permiso EXPLÍCITO necesario en GITHUB_TOKEN para poder hacer push de vuelta
+    permissions:
+      contents: write 
+
+    steps:
+      - name: 📥 Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar entorno Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # Versión moderna para asegurar compatibilidad con la sintaxis de tipado
+          cache: 'pip'
+
+      - name: 📦 Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 📡 Ejecutar Extractor de Radares (Overpass API)
+        run: python scripts/descargar_radares_nacionales.py
+
+      - name: 💾 Commit y Push del nuevo Data Lake
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(data): actualización fractal mensual del data lake de radares OSM"
+          file_pattern: 'data/radares_espana.parquet'
+          branch: main
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
