@@ -6,41 +6,41 @@ Una herramienta autónoma, ultrarrápida y libre de dependencias complejas dise�
 
 ## 🏛️ System Architecture
 
-El sistema abandona por completo los motores de enrutamiento pesado (OSRM) en favor de una arquitectura espacial ligera **$\mathcal{O}(1)$ en latencia de red**:
+El sistema abandona por completo los costosos motores de red o APIs externas iterativas en favor de una **arquitectura espacial offline $\mathcal{O}(1)$ de latencia**, implementando un Data Lake local optimizado:
 
-1. **Ingestión GPX Inofensiva:** Se analiza el archivo `.gpx` del usuario de forma no destructiva, aislando la geometría topológica base sin mutilar metadatos preexistentes.
-2. **Consultas Bounding Box (BBox):** Se calcula el BBox envolvente de la ruta y se lanza una consulta directa a la API de **Overpass (OpenStreetMap)** buscando *exclusivamente* nodos etiquetados como `highway=speed_camera`.
-3. **Caché Agresiva `@st.cache_data`:** Los nodos de la zona se almacenan en RAM por 24 horas, anulando peticiones redundantes cuando iteramos variaciones del mismo track.
-4. **Cruce Espacial O(log n):** Volcado de memoria en Geometría Métrica EPSG:25830 (UTM 30N) aplicando un buffer de solape ajustado a 30 metros de tolerancia en carretera.
-5. **Inyección de Waypoints TTS:** Inserción limpia dentro de la metadata del track con etiquetado semántico `<sym>Danger</sym>` para detonar el motor Text-To-Speech del dispositivo en ruta.
+1. **Ingestión GPX Desacoplada y No Destructiva:** Se analiza y decodifica el árbol XML del archivo `.gpx` aislando la geometría topológica base sin mutilar metadatos preexistentes.
+2. **Data Lake en GeoParquet & Predicate Pushdown:** Consulta directa sobre un dataset local (`data/radares_espana.parquet`) utilizando *Predicate Pushdown* (BBox espacial) a nivel de I/O. Esto descarta la lectura de memoria de datos fuera del scope perimetral de la ruta, logrando acceso $\mathcal{O}(1)$ escalable e idóneo para hardware de bajos recursos.
+3. **Caché Espacial Determinista `@st.cache_data`:** Expansión topológica de celda a nivel matemático (cuadrícula flotante) para garantizar una carga RAM *OOM-proof*, permitiendo recargar la misma área sin golpear el sistema de I/O reiteradamente.
+4. **Cruce Espacial R-Tree ($\mathcal{O}(\log N)$):** Sistema de intersecciones métricas exactas vectorizado por `geopandas`. El sistema hace una inferencia y proyección automática de CRS (e.g., *EPSG:25830 / UTM 30N*) para generar buffers diametrales de 30 metros paramétricos, impidiendo cortes algorítmicos al no simplificar el trazado matriz.
+5. **Inyección de Waypoints Semánticos TTS:** Reempaquetado del *GPX Object* para instanciar `<wpt>` con etiquetas de semántica `<sym>Danger</sym>`, ideados formalmente para gatillar los motores *Text-To-Speech* de navegadores offline.
 
 ---
 
 ## 💻 Tech Stack & Dependencies
 
-Stack aligerado y estandarizado con un footprint base de memoria ínfimo.
+Stack aligerado y estandarizado, focalizado en alto rendimiento de procesamiento de datos espaciales.
 
-| Componente                | Stack Principal                  | Racional Técnico                                                                         |
-|---------------------------|----------------------------------|------------------------------------------------------------------------------------------|
-| **Core GIS Espacial**     | `geopandas`, `shapely`           | Cruce y análisis métrico Vectorial con soporte SRID UTM. Motor analítico GEOS R-Tree.    |
-| **Ingesta OpenStreetMap** | `requests`, *Overpass API*       | Ingesta granular de nodos por caja delimitadora (BBox) eliminando grafos iterativos.     |
-| **GPX Manipulator**       | `gpxpy`                          | Serialización XML de la capa superior manteniendo la integridad de los Tracks/Rutas.     |
-| **Frontend Minimalista**  | `streamlit`                      | Control de estado simple con componente `file_uploader` para un UX vertical asíncrono.   |
+| Componente                    | Stack Principal                  | Racional Técnico                                                                         |
+|-------------------------------|----------------------------------|------------------------------------------------------------------------------------------|
+| **Core Geométrico & Análisis**| `geopandas`, `shapely`           | Análisis Vectorial métrico paramétrico con inferencia UTM. Indexación Espacial R-Tree.   |
+| **Motor I/O Data Lake**       | `parquet` (pyarrow)              | Almacenamiento columnar comprimido; lectura vectorizada vía *Predicate Pushdown*.        |
+| **GPX Manipulator**           | `gpxpy`                          | Serialización XML de alto nivel manteniendo integridad paramétrica de los *Tracks*.      |
+| **Frontend Asíncrono**        | `streamlit`                      | Control de estado simple con componente visual inmersivo para un UX de fricción cero.    |
 
 ---
 
 ## 🛠️ Despliegue Local
 
-El repositorio es modular y la configuración un simple proceso en tres pasos:
+El repositorio es modular y la configuración un simple proceso local:
 
-**1. Clonar el repositorio y acceder:**
+**1. Clonar el repositorio:**
 
 ```bash
-git clone https://github.com/Chane12/Gasolineras-GPX-Optimizador-de-Repostaje-en-Ruta.git
-cd Gasolineras-GPX-Optimizador-de-Repostaje-en-Ruta
+git clone https://github.com/Chane12/Inyector-Radares-Moto-GPX.git
+cd Inyector-Radares-Moto-GPX
 ```
 
-**2. Entorno Virtual y Dependencias:**
+**2. Entorno Virtual e Instalación de Dependencias:**
 
 ```bash
 python -m venv venv
@@ -52,7 +52,13 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**3. Ejecución Interfaz Streamlit:**
+**3. Precarga del Data Lake Local (Radares España):**
+
+```bash
+python scripts/descargar_radares_nacionales.py
+```
+
+**4. Ejecución del Core en Streamlit:**
 
 ```bash
 streamlit run radares_app.py
