@@ -67,8 +67,47 @@ if __name__ == "__main__":
     gdf_radares = descargar_radares_bbox(*PENINSULA_BBOX)
     
     if gdf_radares is not None:
+        # =================================================================
+        # SANITY CHECKS (AUDITORÍA DE CALIDAD ANTI-ENVENENAMIENTO)
+        # =================================================================
+        print("Iniciando auditoría de calidad (Sanity Checks)...")
+        
+        # 1. Validación de Volumen Mínimo (Estadística)
+        # Históricamente sabemos que hay más de 3000 radares.
+        MIN_RADARES_ESPERADOS = 2800
+        total_radares = len(gdf_radares)
+        if total_radares < MIN_RADARES_ESPERADOS:
+            raise ValueError(f"SANITY CHECK FALLIDO: Volumen crítico bajo. "
+                             f"Apenas {total_radares} radares detectados frente a los {MIN_RADARES_ESPERADOS} esperados. "
+                             "Posible anomalía o microcorte en Overpass API.")
+                             
+        # 2. Validación Espacial / Dispersión (Geométrica)
+        # Verificamos que los puntos realmente cubren la geografía ibérica y no son solo un clúster local 
+        # fruto de un Rate Limit que cortó la request por la mitad.
+        minx, miny, maxx, maxy = gdf_radares.total_bounds
+        amplitud_lon = maxx - minx
+        amplitud_lat = maxy - miny
+        
+        if amplitud_lon < 10.0 or amplitud_lat < 5.0:
+            raise ValueError(f"SANITY CHECK FALLIDO: Colapso espacial. "
+                             f"La caja delimitadora resultantes es anormalmente pequeña (Lon: {amplitud_lon:.1f}º, Lat: {amplitud_lat:.1f}º). "
+                             "La API ha devuelto un resultado parcial.")
+                             
+        # 3. Integridad Atributiva Crítica
+        # Asegurar que una masa razonable de radares (ej. al menos un 30%) tenga etiqueta de velocidad máxima.
+        # Si de repente todos pierden la velocidad, la estructura semántica ha cambiado o fallado.
+        con_velocidad = gdf_radares['maxspeed'].notna().sum()
+        ratio_velocidad = con_velocidad / total_radares
+        if ratio_velocidad < 0.20:
+            raise ValueError(f"SANITY CHECK FALLIDO: Atributos corruptos. "
+                             f"Apenas el {ratio_velocidad*100:.1f}% de radares tiene etiqueta 'maxspeed'. "
+                             "Anomalía en los metadatos de OpenStreetMap.")
+                             
+        print("✅ Auditoría superada: Volumen, Dispersión Espacial e Integridad validados.")
+        # =================================================================
+        
         os.makedirs("data", exist_ok=True)
         out_path = "data/radares_espana.parquet"
-        print(f"Guardando {len(gdf_radares)} radares en {out_path} mediante formato columnar...")
+        print(f"Guardando {total_radares} radares en {out_path} mediante formato columnar...")
         gdf_radares.to_parquet(out_path, index=False, schema_version="1.1.0", write_covering_bbox=True)
         print("¡Data Lake construido con éxito! 🚀")
